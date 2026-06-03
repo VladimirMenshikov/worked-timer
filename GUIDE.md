@@ -7,7 +7,7 @@
 ## Быстрый старт
 
 ```bash
-cd /home/volodya/win-data/claude-code/zerocoder/ai-worked-timer
+cd /путь/к/ai-worked-timer
 .venv/bin/python timer.py
 ```
 
