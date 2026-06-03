@@ -1,0 +1,14 @@
+# Секреты
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Виртуальное окружение
+.venv/
+
+# Временные файлы
+*.tmp
+nohup.out
