@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Work Timer
+Comment=Трекер рабочего времени в системном трее
+Exec=/opt/work-timer/.venv/bin/python /opt/work-timer/timer.py
+Icon=appointment-soon
+Terminal=false
+Categories=Utility;
+X-GNOME-Autostart-enabled=false

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+if [ "$1" = "purge" ]; then
+    rm -rf /opt/work-timer/.venv
+    rm -f /opt/work-timer/.env
+    rm -f "$HOME/.config/autostart/work-timer.desktop" 2>/dev/null || true
+fi
+
+exit 0

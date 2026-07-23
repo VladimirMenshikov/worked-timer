@@ -1,0 +1,12 @@
+Package: work-timer
+Version: 1.0.0
+Section: utils
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.10), python3-venv, python3-pip, python3-gi, python3-gi-cairo, libnotify-bin, zenity, wmctrl
+Recommends: gir1.2-ayatanaappindicator3-0.1 | gir1.2-appindicator3-0.1
+Maintainer: VladimirMenshikov <vl.ai.zc.993587@gmail.com>
+Description: Work Timer - system tray work time tracker
+ Tray application for Linux Mint / Cinnamon that logs work sessions
+ (start/pause/resume/stop) to Supabase and generates Markdown time
+ reports for the week and month.

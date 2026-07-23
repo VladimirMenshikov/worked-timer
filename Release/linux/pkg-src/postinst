@@ -1,0 +1,31 @@
+#!/bin/sh
+set -e
+
+APP_DIR=/opt/work-timer
+
+python3 -m venv "$APP_DIR/.venv" --system-site-packages
+"$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
+"$APP_DIR/.venv/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
+
+if [ ! -f "$APP_DIR/.env" ]; then
+    cp "$APP_DIR/.env.example" "$APP_DIR/.env"
+    chmod 600 "$APP_DIR/.env"
+fi
+
+chmod +x "$APP_DIR/timer.py" "$APP_DIR/autostart.sh"
+
+cat <<'MSG'
+
+=== Work Timer установлен ===
+
+1. Отредактируйте /opt/work-timer/.env — укажите SUPABASE_URL и SUPABASE_KEY
+2. Выполните SQL-миграции из /opt/work-timer/sql/migrations (по порядку,
+   начиная с 0000) в Supabase -> SQL Editor
+3. Запустите Work Timer через меню приложений, либо командой:
+   /opt/work-timer/.venv/bin/python /opt/work-timer/timer.py
+4. Для автозапуска при входе в систему выполните:
+   bash /opt/work-timer/autostart.sh
+
+MSG
+
+exit 0
