@@ -18,11 +18,13 @@ cat <<'MSG'
 
 === Work Timer установлен ===
 
-1. Отредактируйте /opt/work-timer/.env — укажите SUPABASE_URL и SUPABASE_KEY
-2. Выполните SQL-миграции из /opt/work-timer/sql/migrations (по порядку,
-   начиная с 0000) в Supabase -> SQL Editor
-3. Запустите Work Timer через меню приложений, либо командой:
+1. Запустите Work Timer через меню приложений, либо командой:
    /opt/work-timer/.venv/bin/python /opt/work-timer/timer.py
+2. При первом запуске появится мастер настройки БД (Supabase или PostgreSQL) —
+   данные подключения сохранятся в /opt/work-timer/.env
+3. Если указана строка подключения PostgreSQL (DATABASE_URL), миграции из
+   /opt/work-timer/sql/migrations применятся автоматически. Без неё —
+   выполните их вручную по порядку в Supabase -> SQL Editor.
 4. Для автозапуска при входе в систему выполните:
    bash /opt/work-timer/autostart.sh
 

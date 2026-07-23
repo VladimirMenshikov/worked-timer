@@ -24,5 +24,5 @@ if not exist "output" mkdir output
 
 echo.
 echo === Done ===
-echo Result: output\WorkTimerSetup-1.0.0.exe
+echo Result: output\WorkTimerSetup-1.1.0.exe
 pause

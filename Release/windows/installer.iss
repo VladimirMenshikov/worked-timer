@@ -3,7 +3,7 @@
 ; Prerequisite: run build_exe.bat first to produce dist\WorkTimer.exe
 
 #define MyAppName "Work Timer"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "VladimirMenshikov"
 #define MyAppExeName "WorkTimer.exe"
 

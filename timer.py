@@ -30,12 +30,12 @@ LAST_PATH_FILE = CONFIG_DIR / "last_report_path.txt"
 
 import pystray
 from PIL import Image, ImageDraw
-from dotenv import load_dotenv
-from supabase import create_client
+from dotenv import load_dotenv, set_key
 
-load_dotenv()
+import db_backend
 
-TABLE = "wh_work_log"
+ENV_PATH = Path(__file__).parent / ".env"
+load_dotenv(ENV_PATH)
 
 
 def _make_icon(r: int, g: int, b: int, size: int = 64) -> Image.Image:
@@ -147,6 +147,97 @@ def notify(title: str, body: str) -> None:
     )
 
 
+def fatal_error(msg: str) -> None:
+    subprocess.run(
+        ["zenity", "--error", "--title=Work Timer", f"--text={msg}", "--width=400"],
+        capture_output=True,
+        env=_zenity_env(),
+    )
+    sys.exit(1)
+
+
+def _needs_db_setup() -> bool:
+    backend = os.environ.get("DB_BACKEND", "").strip().lower()
+
+    if backend not in ("supabase", "postgres"):
+        # Обратная совместимость: .env уже содержит рабочие Supabase-креды
+        # из версии приложения до появления DB_BACKEND — не переспрашиваем.
+        if os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"):
+            set_key(ENV_PATH, "DB_BACKEND", "supabase")
+            load_dotenv(ENV_PATH, override=True)
+            return False
+        return True
+
+    if backend == "supabase":
+        return not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"))
+    return not os.environ.get("DATABASE_URL")
+
+
+def run_setup_wizard() -> None:
+    """Мастер первого запуска: выбор Supabase или PostgreSQL, ввод реквизитов в .env."""
+    choice = subprocess.run(
+        [
+            "zenity", "--list", "--radiolist",
+            "--title=Work Timer — настройка подключения к БД",
+            "--text=Выберите способ подключения к базе данных:",
+            "--column=", "--column=Вариант",
+            "--print-column=2", "--hide-header",
+            "TRUE", "Supabase",
+            "FALSE", "PostgreSQL (прямое подключение)",
+            "--width=460", "--height=220",
+        ],
+        capture_output=True, text=True, env=_zenity_env(),
+    )
+    label = choice.stdout.strip()
+    if choice.returncode != 0 or not label:
+        fatal_error("Настройка БД не завершена — подключение не задано.")
+
+    if label.startswith("Supabase"):
+        form = subprocess.run(
+            [
+                "zenity", "--forms",
+                "--title=Work Timer — Supabase",
+                "--text=Данные подключения Supabase (Project Settings → API)",
+                "--add-entry=SUPABASE_URL",
+                "--add-entry=SUPABASE_KEY (anon key)",
+                "--add-entry=DATABASE_URL (необязательно — для автомиграций, Project Settings → Database)",
+                "--width=560",
+            ],
+            capture_output=True, text=True, env=_zenity_env(),
+        )
+        if form.returncode != 0:
+            fatal_error("Настройка БД не завершена.")
+        parts = (form.stdout.rstrip("\n").split("|") + ["", "", ""])[:3]
+        url, key, dsn = (p.strip() for p in parts)
+        if not url or not key:
+            fatal_error("SUPABASE_URL и SUPABASE_KEY обязательны.")
+        set_key(ENV_PATH, "DB_BACKEND", "supabase")
+        set_key(ENV_PATH, "SUPABASE_URL", url)
+        set_key(ENV_PATH, "SUPABASE_KEY", key)
+        if dsn:
+            set_key(ENV_PATH, "DATABASE_URL", dsn)
+    else:
+        form = subprocess.run(
+            [
+                "zenity", "--forms",
+                "--title=Work Timer — PostgreSQL",
+                "--text=Строка подключения PostgreSQL",
+                "--add-entry=DATABASE_URL (postgresql://user:password@host:port/dbname)",
+                "--width=560",
+            ],
+            capture_output=True, text=True, env=_zenity_env(),
+        )
+        if form.returncode != 0:
+            fatal_error("Настройка БД не завершена.")
+        dsn = form.stdout.strip()
+        if not dsn:
+            fatal_error("DATABASE_URL обязателен.")
+        set_key(ENV_PATH, "DB_BACKEND", "postgres")
+        set_key(ENV_PATH, "DATABASE_URL", dsn)
+
+    load_dotenv(ENV_PATH, override=True)
+
+
 class WorkTimer:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -159,20 +250,10 @@ class WorkTimer:
         self.session_id: Optional[str] = None
         self._busy = False
 
-        url = os.environ.get("SUPABASE_URL", "")
-        key = os.environ.get("SUPABASE_KEY", "")
-        if not url or not key:
-            self._fatal("Не заданы SUPABASE_URL и/или SUPABASE_KEY в файле .env")
-        self._db = create_client(url, key)
-
-    @staticmethod
-    def _fatal(msg: str) -> None:
-        subprocess.run(
-            ["zenity", "--error", "--title=Work Timer", f"--text={msg}", "--width=400"],
-            capture_output=True,
-            env=_zenity_env(),
-        )
-        sys.exit(1)
+        try:
+            self._db = db_backend.create_backend(os.environ)
+        except RuntimeError as exc:
+            fatal_error(str(exc))
 
     # ------------------------------------------------------------------ меню
 
@@ -225,12 +306,12 @@ class WorkTimer:
             session_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc)
 
-            self._db.table(TABLE).insert({
+            self._db.insert_event({
                 "session_id": session_id,
                 "operation": "start",
                 "task": task,
                 "event_time": now.isoformat(),
-            }).execute()
+            })
 
             with self._lock:
                 self.running = True
@@ -270,13 +351,13 @@ class WorkTimer:
             elapsed_sec = int(accumulated_sec)
             elapsed_str = format_elapsed(elapsed_sec)
 
-            self._db.table(TABLE).insert({
+            self._db.insert_event({
                 "session_id": session_id,
                 "operation": "stop",
                 "task": task,
                 "event_time": now.isoformat(),
                 "elapsed_time": elapsed_str,
-            }).execute()
+            })
 
             with self._lock:
                 self.running = False
@@ -313,12 +394,12 @@ class WorkTimer:
             if segment_start is not None:
                 accumulated_sec += (now - segment_start).total_seconds()
 
-            self._db.table(TABLE).insert({
+            self._db.insert_event({
                 "session_id": session_id,
                 "operation": "pause",
                 "task": task,
                 "event_time": now.isoformat(),
-            }).execute()
+            })
 
             with self._lock:
                 self.paused = True
@@ -347,12 +428,12 @@ class WorkTimer:
         try:
             now = datetime.now(timezone.utc)
 
-            self._db.table(TABLE).insert({
+            self._db.insert_event({
                 "session_id": session_id,
                 "operation": "resume",
                 "task": task,
                 "event_time": now.isoformat(),
-            }).execute()
+            })
 
             with self._lock:
                 self.paused = False
@@ -379,19 +460,12 @@ class WorkTimer:
         )
 
         try:
-            starts_res = (
-                self._db.table(TABLE)
-                .select("*")
-                .eq("operation", "start")
-                .gte("event_time", today_start_utc.isoformat())
-                .order("event_time")
-                .execute()
-            )
+            starts = self._db.select_starts_since(today_start_utc)
         except Exception as exc:
             notify("Ошибка статистики", str(exc))
             return
 
-        if not starts_res.data:
+        if not starts:
             subprocess.run(
                 ["zenity", "--info", "--title=Статистика",
                  "--text=Сегодня нет записей.", "--width=300"],
@@ -400,21 +474,15 @@ class WorkTimer:
             )
             return
 
-        session_ids = [r["session_id"] for r in starts_res.data]
+        session_ids = [r["session_id"] for r in starts]
         try:
-            all_res = (
-                self._db.table(TABLE)
-                .select("*")
-                .in_("session_id", session_ids)
-                .order("event_time")
-                .execute()
-            )
+            all_events = self._db.select_events_for_sessions(session_ids)
         except Exception as exc:
             notify("Ошибка статистики", str(exc))
             return
 
         events_by_session = defaultdict(list)
-        for r in all_res.data:
+        for r in all_events:
             events_by_session[r["session_id"]].append({
                 "operation": r["operation"],
                 "event_time": datetime.fromisoformat(r["event_time"]),
@@ -424,7 +492,7 @@ class WorkTimer:
         rows = []
         total_sec = 0
 
-        for start in starts_res.data:
+        for start in starts:
             sid = start["session_id"]
             task = (start["task"] or "").strip()
             start_dt = datetime.fromisoformat(start["event_time"])
@@ -537,28 +605,15 @@ class WorkTimer:
         return path
 
     def _fetch_sessions_since(self, from_dt_utc: datetime) -> list:
-        starts_res = (
-            self._db.table(TABLE)
-            .select("*")
-            .eq("operation", "start")
-            .gte("event_time", from_dt_utc.isoformat())
-            .order("event_time")
-            .execute()
-        )
-        if not starts_res.data:
+        starts = self._db.select_starts_since(from_dt_utc)
+        if not starts:
             return []
 
-        session_ids = [r["session_id"] for r in starts_res.data]
-        all_res = (
-            self._db.table(TABLE)
-            .select("*")
-            .in_("session_id", session_ids)
-            .order("event_time")
-            .execute()
-        )
+        session_ids = [r["session_id"] for r in starts]
+        all_events = self._db.select_events_for_sessions(session_ids)
 
         events_by_session = defaultdict(list)
-        for r in all_res.data:
+        for r in all_events:
             events_by_session[r["session_id"]].append({
                 "operation": r["operation"],
                 "event_time": datetime.fromisoformat(r["event_time"]),
@@ -566,7 +621,7 @@ class WorkTimer:
 
         now_utc = datetime.now(timezone.utc)
         sessions = []
-        for start in starts_res.data:
+        for start in starts:
             sid = start["session_id"]
             task = (start["task"] or "").strip()
             start_dt = datetime.fromisoformat(start["event_time"]).astimezone()
@@ -722,5 +777,22 @@ class WorkTimer:
         icon.run()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    if _needs_db_setup():
+        run_setup_wizard()
+
+    dsn = os.environ.get("DATABASE_URL", "").strip()
+    if dsn:
+        try:
+            applied = db_backend.run_pending_migrations(dsn)
+        except Exception as exc:
+            fatal_error(f"Не удалось применить миграции БД:\n{exc}")
+            return
+        if applied:
+            notify("Миграции БД применены", ", ".join(applied))
+
     WorkTimer().run()
+
+
+if __name__ == "__main__":
+    main()

@@ -5,7 +5,7 @@
 ## Установка
 
 ```bash
-sudo apt install ./work-timer_1.0.0_all.deb
+sudo apt install ./work-timer_1.1.0_all.deb
 ```
 
 (`apt install ./...` сам подтянет недостающие системные зависимости — `python3-gi`, `zenity`, `libnotify-bin`, `wmctrl` и т.д.; при установке через `dpkg -i` их придётся доустанавливать вручную через `apt -f install`.)
@@ -18,15 +18,12 @@ sudo apt install ./work-timer_1.0.0_all.deb
 
 ## Настройка после установки
 
-1. Отредактируйте `/opt/work-timer/.env` — укажите `SUPABASE_URL` и `SUPABASE_KEY`:
-   ```bash
-   sudo nano /opt/work-timer/.env
-   ```
-2. Выполните SQL-миграции из `/opt/work-timer/sql/migrations` по порядку (0000 → далее) в Supabase → SQL Editor.
-3. Запустите Work Timer через меню приложений (пункт «Work Timer») либо командой:
+1. Запустите Work Timer через меню приложений (пункт «Work Timer») либо командой:
    ```bash
    /opt/work-timer/.venv/bin/python /opt/work-timer/timer.py
    ```
+2. При первом запуске появится мастер настройки — выберите Supabase или PostgreSQL и введите данные подключения (подробности — в [`../../GUIDE.md`](../../GUIDE.md#3-настройка-подключения-к-бд)). Данные сохранятся в `/opt/work-timer/.env`.
+3. Если указана строка подключения PostgreSQL (`DATABASE_URL`), таблицы создадутся автоматически — миграции из `/opt/work-timer/sql/migrations` применяются при каждом запуске. Без неё выполните их вручную по порядку (0000 → далее) в Supabase → SQL Editor.
 4. Автозапуск при входе в систему:
    ```bash
    bash /opt/work-timer/autostart.sh

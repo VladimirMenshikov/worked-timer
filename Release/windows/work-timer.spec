@@ -9,7 +9,12 @@ a = Analysis(
     [os.path.join(SRC_DIR, "timer.py")],
     pathex=[SRC_DIR],
     binaries=[],
-    datas=[],
+    # sql/migrations должен распаковаться рядом с db_backend.py во временной
+    # директории onefile-бандла (sys._MEIPASS) — код ищет миграции через
+    # Path(__file__).parent, а не рядом с WorkTimer.exe.
+    datas=[
+        (os.path.join(SRC_DIR, "sql", "migrations"), os.path.join("sql", "migrations")),
+    ],
     hiddenimports=["pystray._win32"],
     hookspath=[],
     runtime_hooks=[],

@@ -31,12 +31,12 @@ LAST_PATH_FILE = CONFIG_DIR / "last_report_path.txt"
 
 import pystray
 from PIL import Image, ImageDraw
-from dotenv import load_dotenv
-from supabase import create_client
+from dotenv import load_dotenv, set_key
 
-load_dotenv()
+import db_backend
 
-TABLE = "wh_work_log"
+ENV_PATH = Path(__file__).parent / ".env"
+load_dotenv(ENV_PATH)
 
 
 def _make_icon(r: int, g: int, b: int, size: int = 64) -> Image.Image:
@@ -180,6 +180,164 @@ def _show_text_window(title: str, text: str, width: int = 780, height: int = 420
     root.mainloop()
 
 
+def fatal_error(msg: str) -> None:
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    messagebox.showerror("Work Timer", msg, parent=root)
+    root.destroy()
+    sys.exit(1)
+
+
+def _needs_db_setup() -> bool:
+    backend = os.environ.get("DB_BACKEND", "").strip().lower()
+
+    if backend not in ("supabase", "postgres"):
+        # Обратная совместимость: .env уже содержит рабочие Supabase-креды
+        # из версии приложения до появления DB_BACKEND — не переспрашиваем.
+        if os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"):
+            set_key(ENV_PATH, "DB_BACKEND", "supabase")
+            load_dotenv(ENV_PATH, override=True)
+            return False
+        return True
+
+    if backend == "supabase":
+        return not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"))
+    return not os.environ.get("DATABASE_URL")
+
+
+def _ask_backend_choice() -> Optional[str]:
+    result = {"value": None}
+
+    root = tk.Tk()
+    root.title("Work Timer — настройка подключения к БД")
+    root.attributes("-topmost", True)
+    root.resizable(False, False)
+
+    tk.Label(
+        root, text="Выберите способ подключения к базе данных:",
+        padx=16, pady=(16, 8), anchor="w",
+    ).pack(fill="x")
+
+    choice_var = tk.StringVar(value="supabase")
+    tk.Radiobutton(root, text="Supabase", variable=choice_var, value="supabase").pack(anchor="w", padx=24)
+    tk.Radiobutton(
+        root, text="PostgreSQL (прямое подключение)",
+        variable=choice_var, value="postgres",
+    ).pack(anchor="w", padx=24, pady=(0, 12))
+
+    def on_ok(event=None):
+        result["value"] = choice_var.get()
+        root.destroy()
+
+    def on_cancel(event=None):
+        root.destroy()
+
+    btns = tk.Frame(root)
+    btns.pack(pady=(0, 16))
+    tk.Button(btns, text="Далее", width=10, command=on_ok).pack(side="left", padx=6)
+    tk.Button(btns, text="Отмена", width=10, command=on_cancel).pack(side="left", padx=6)
+
+    root.protocol("WM_DELETE_WINDOW", on_cancel)
+    root.update_idletasks()
+    w, h = root.winfo_width(), root.winfo_height()
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    root.mainloop()
+    return result["value"]
+
+
+def _ask_form(title: str, prompt: str, fields: list) -> Optional[list]:
+    """fields — подписи полей. Возвращает введённые значения либо None при отмене."""
+    result = {"value": None}
+
+    root = tk.Tk()
+    root.title(title)
+    root.attributes("-topmost", True)
+    root.resizable(False, False)
+
+    tk.Label(
+        root, text=prompt, padx=16, pady=(16, 8),
+        justify="left", wraplength=460, anchor="w",
+    ).pack(fill="x")
+
+    entries = []
+    for label in fields:
+        tk.Label(root, text=label, padx=16, anchor="w").pack(fill="x")
+        entry = tk.Entry(root, width=60)
+        entry.pack(padx=16, pady=(0, 8))
+        entries.append(entry)
+
+    def on_ok(event=None):
+        result["value"] = [e.get().strip() for e in entries]
+        root.destroy()
+
+    def on_cancel(event=None):
+        root.destroy()
+
+    btns = tk.Frame(root)
+    btns.pack(pady=(4, 16))
+    tk.Button(btns, text="OK", width=10, command=on_ok).pack(side="left", padx=6)
+    tk.Button(btns, text="Отмена", width=10, command=on_cancel).pack(side="left", padx=6)
+
+    root.protocol("WM_DELETE_WINDOW", on_cancel)
+    root.bind("<Return>", on_ok)
+    root.bind("<Escape>", on_cancel)
+
+    root.update_idletasks()
+    w, h = root.winfo_width(), root.winfo_height()
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    entries[0].focus_force()
+    root.mainloop()
+    return result["value"]
+
+
+def run_setup_wizard() -> None:
+    """Мастер первого запуска: выбор Supabase или PostgreSQL, ввод реквизитов в .env."""
+    backend = _ask_backend_choice()
+    if not backend:
+        fatal_error("Настройка БД не завершена — подключение не задано.")
+
+    if backend == "supabase":
+        values = _ask_form(
+            "Work Timer — Supabase",
+            "Данные подключения Supabase (Project Settings → API)",
+            [
+                "SUPABASE_URL",
+                "SUPABASE_KEY (anon key)",
+                "DATABASE_URL (необязательно — для автомиграций, Project Settings → Database)",
+            ],
+        )
+        if values is None:
+            fatal_error("Настройка БД не завершена.")
+        url, key, dsn = values
+        if not url or not key:
+            fatal_error("SUPABASE_URL и SUPABASE_KEY обязательны.")
+        set_key(ENV_PATH, "DB_BACKEND", "supabase")
+        set_key(ENV_PATH, "SUPABASE_URL", url)
+        set_key(ENV_PATH, "SUPABASE_KEY", key)
+        if dsn:
+            set_key(ENV_PATH, "DATABASE_URL", dsn)
+    else:
+        values = _ask_form(
+            "Work Timer — PostgreSQL",
+            "Строка подключения PostgreSQL",
+            ["DATABASE_URL (postgresql://user:password@host:port/dbname)"],
+        )
+        if values is None:
+            fatal_error("Настройка БД не завершена.")
+        dsn = values[0]
+        if not dsn:
+            fatal_error("DATABASE_URL обязателен.")
+        set_key(ENV_PATH, "DB_BACKEND", "postgres")
+        set_key(ENV_PATH, "DATABASE_URL", dsn)
+
+    load_dotenv(ENV_PATH, override=True)
+
+
 class WorkTimer:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -192,20 +350,10 @@ class WorkTimer:
         self.session_id: Optional[str] = None
         self._busy = False
 
-        url = os.environ.get("SUPABASE_URL", "")
-        key = os.environ.get("SUPABASE_KEY", "")
-        if not url or not key:
-            self._fatal("Не заданы SUPABASE_URL и/или SUPABASE_KEY в файле .env")
-        self._db = create_client(url, key)
-
-    @staticmethod
-    def _fatal(msg: str) -> None:
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-        messagebox.showerror("Work Timer", msg, parent=root)
-        root.destroy()
-        sys.exit(1)
+        try:
+            self._db = db_backend.create_backend(os.environ)
+        except RuntimeError as exc:
+            fatal_error(str(exc))
 
     # ------------------------------------------------------------------ меню
 
@@ -258,12 +406,12 @@ class WorkTimer:
             session_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc)
 
-            self._db.table(TABLE).insert({
+            self._db.insert_event({
                 "session_id": session_id,
                 "operation": "start",
                 "task": task,
                 "event_time": now.isoformat(),
-            }).execute()
+            })
 
             with self._lock:
                 self.running = True
@@ -303,13 +451,13 @@ class WorkTimer:
             elapsed_sec = int(accumulated_sec)
             elapsed_str = format_elapsed(elapsed_sec)
 
-            self._db.table(TABLE).insert({
+            self._db.insert_event({
                 "session_id": session_id,
                 "operation": "stop",
                 "task": task,
                 "event_time": now.isoformat(),
                 "elapsed_time": elapsed_str,
-            }).execute()
+            })
 
             with self._lock:
                 self.running = False
@@ -346,12 +494,12 @@ class WorkTimer:
             if segment_start is not None:
                 accumulated_sec += (now - segment_start).total_seconds()
 
-            self._db.table(TABLE).insert({
+            self._db.insert_event({
                 "session_id": session_id,
                 "operation": "pause",
                 "task": task,
                 "event_time": now.isoformat(),
-            }).execute()
+            })
 
             with self._lock:
                 self.paused = True
@@ -380,12 +528,12 @@ class WorkTimer:
         try:
             now = datetime.now(timezone.utc)
 
-            self._db.table(TABLE).insert({
+            self._db.insert_event({
                 "session_id": session_id,
                 "operation": "resume",
                 "task": task,
                 "event_time": now.isoformat(),
-            }).execute()
+            })
 
             with self._lock:
                 self.paused = False
@@ -412,19 +560,12 @@ class WorkTimer:
         )
 
         try:
-            starts_res = (
-                self._db.table(TABLE)
-                .select("*")
-                .eq("operation", "start")
-                .gte("event_time", today_start_utc.isoformat())
-                .order("event_time")
-                .execute()
-            )
+            starts = self._db.select_starts_since(today_start_utc)
         except Exception as exc:
             notify("Ошибка статистики", str(exc))
             return
 
-        if not starts_res.data:
+        if not starts:
             root = tk.Tk()
             root.withdraw()
             root.attributes("-topmost", True)
@@ -432,21 +573,15 @@ class WorkTimer:
             root.destroy()
             return
 
-        session_ids = [r["session_id"] for r in starts_res.data]
+        session_ids = [r["session_id"] for r in starts]
         try:
-            all_res = (
-                self._db.table(TABLE)
-                .select("*")
-                .in_("session_id", session_ids)
-                .order("event_time")
-                .execute()
-            )
+            all_events = self._db.select_events_for_sessions(session_ids)
         except Exception as exc:
             notify("Ошибка статистики", str(exc))
             return
 
         events_by_session = defaultdict(list)
-        for r in all_res.data:
+        for r in all_events:
             events_by_session[r["session_id"]].append({
                 "operation": r["operation"],
                 "event_time": datetime.fromisoformat(r["event_time"]),
@@ -456,7 +591,7 @@ class WorkTimer:
         rows = []
         total_sec = 0
 
-        for start in starts_res.data:
+        for start in starts:
             sid = start["session_id"]
             task = (start["task"] or "").strip()
             start_dt = datetime.fromisoformat(start["event_time"])
@@ -547,28 +682,15 @@ class WorkTimer:
         return path
 
     def _fetch_sessions_since(self, from_dt_utc: datetime) -> list:
-        starts_res = (
-            self._db.table(TABLE)
-            .select("*")
-            .eq("operation", "start")
-            .gte("event_time", from_dt_utc.isoformat())
-            .order("event_time")
-            .execute()
-        )
-        if not starts_res.data:
+        starts = self._db.select_starts_since(from_dt_utc)
+        if not starts:
             return []
 
-        session_ids = [r["session_id"] for r in starts_res.data]
-        all_res = (
-            self._db.table(TABLE)
-            .select("*")
-            .in_("session_id", session_ids)
-            .order("event_time")
-            .execute()
-        )
+        session_ids = [r["session_id"] for r in starts]
+        all_events = self._db.select_events_for_sessions(session_ids)
 
         events_by_session = defaultdict(list)
-        for r in all_res.data:
+        for r in all_events:
             events_by_session[r["session_id"]].append({
                 "operation": r["operation"],
                 "event_time": datetime.fromisoformat(r["event_time"]),
@@ -576,7 +698,7 @@ class WorkTimer:
 
         now_utc = datetime.now(timezone.utc)
         sessions = []
-        for start in starts_res.data:
+        for start in starts:
             sid = start["session_id"]
             task = (start["task"] or "").strip()
             start_dt = datetime.fromisoformat(start["event_time"]).astimezone()
@@ -732,5 +854,22 @@ class WorkTimer:
         icon.run()
 
 
-if __name__ == "__main__":
+def main() -> None:
+    if _needs_db_setup():
+        run_setup_wizard()
+
+    dsn = os.environ.get("DATABASE_URL", "").strip()
+    if dsn:
+        try:
+            applied = db_backend.run_pending_migrations(dsn)
+        except Exception as exc:
+            fatal_error(f"Не удалось применить миграции БД:\n{exc}")
+            return
+        if applied:
+            notify("Миграции БД применены", ", ".join(applied))
+
     WorkTimer().run()
+
+
+if __name__ == "__main__":
+    main()

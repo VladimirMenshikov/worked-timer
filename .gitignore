@@ -12,3 +12,8 @@ __pycache__/
 # Временные файлы
 *.tmp
 nohup.out
+
+# Артефакты сборки Windows-релиза
+Release/windows/build_venv/
+Release/windows/dist/
+Release/windows/output/
