@@ -4,7 +4,7 @@
 CREATE TABLE wh_work_log (
     id           BIGSERIAL    PRIMARY KEY,
     session_id   UUID         NOT NULL,
-    operation    VARCHAR(5)   NOT NULL CHECK (operation IN ('start', 'stop')),
+    operation    VARCHAR(6)   NOT NULL CHECK (operation IN ('start', 'pause', 'resume', 'stop')),
     task         TEXT,
     event_time   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     elapsed_time TEXT

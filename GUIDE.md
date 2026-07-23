@@ -31,19 +31,34 @@ cd /путь/к/ai-worked-timer
 | `task` | введённая задача |
 | `event_time` | текущее время (UTC) |
 
-### Завершить работу
+### Поставить на паузу
 
 1. Нажмите на **красный кружок** в трее
+2. Выберите **⏸ Пауза**
+
+Кружок станет **жёлтым**. Время на паузе не засчитывается в итог задачи. В базу запишется:
+
+| Поле | Значение |
+|---|---|
+| `operation` | `pause` |
+| `task` | название задачи |
+| `event_time` | время постановки на паузу (UTC) |
+
+Чтобы продолжить — нажмите на **жёлтый кружок** и выберите **▶ Продолжить**. В базу запишется событие `resume`, кружок снова станет **красным**.
+
+### Завершить работу
+
+1. Нажмите на **красный** (или **жёлтый**, если на паузе) кружок в трее
 2. Выберите **⏹ Остановить таймер**
 
-Кружок снова станет **зелёным**. Появится уведомление с итогом. В базу запишется:
+Остановить таймер можно и находясь на паузе — досрочный `resume` не требуется. Кружок снова станет **зелёным**. Появится уведомление с итогом. В базу запишется:
 
 | Поле | Значение |
 |---|---|
 | `operation` | `stop` |
 | `task` | название задачи |
 | `event_time` | время остановки (UTC) |
-| `elapsed_time` | затраченное время |
+| `elapsed_time` | затраченное время (без учёта пауз) |
 
 ### Формат затраченного времени
 
@@ -82,7 +97,7 @@ ai-worked-timer/
 sudo apt install python3-gi python3-gi-cairo \
     gir1.2-ayatanaappindicator3-0.1 \
     libayatana-appindicator3-1 \
-    libnotify-bin zenity
+    libnotify-bin zenity wmctrl
 ```
 
 ### 2. Виртуальное окружение
@@ -113,7 +128,7 @@ SUPABASE_KEY=ваш-anon-key
 CREATE TABLE wh_work_log (
     id           BIGSERIAL    PRIMARY KEY,
     session_id   UUID         NOT NULL,
-    operation    VARCHAR(5)   NOT NULL CHECK (operation IN ('start', 'stop')),
+    operation    VARCHAR(6)   NOT NULL CHECK (operation IN ('start', 'pause', 'resume', 'stop')),
     task         TEXT,
     event_time   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     elapsed_time TEXT
@@ -142,18 +157,18 @@ rm ~/.config/autostart/work-timer.desktop
 
 ## Структура данных в Supabase
 
-Таблица `wh_work_log`. Каждая рабочая сессия — две строки: `start` и `stop`, связанные по `session_id`.
+Таблица `wh_work_log`. Каждая рабочая сессия — цепочка строк с одним `session_id`: `start`, затем ноль и более пар `pause`/`resume`, и в конце `stop`.
 
 | Поле | Тип | Описание |
 |---|---|---|
 | `id` | bigserial | Первичный ключ |
-| `session_id` | uuid | Связывает start и stop одной сессии |
-| `operation` | varchar(5) | `start` или `stop` |
+| `session_id` | uuid | Связывает все события одной сессии |
+| `operation` | varchar(6) | `start`, `pause`, `resume` или `stop` |
 | `task` | text | Название задачи |
 | `event_time` | timestamptz | Время события (UTC) |
-| `elapsed_time` | text | Затраченное время (только у `stop`) |
+| `elapsed_time` | text | Затраченное время без учёта пауз (только у `stop`) |
 
-Пример запроса для просмотра всех сессий:
+Пример запроса для просмотра завершённых сессий (итог уже без пауз, т.к. считается приложением при остановке):
 
 ```sql
 SELECT
@@ -188,6 +203,26 @@ dpkg -l | grep ayatana
 Убедитесь, что установлен `zenity`:
 ```bash
 which zenity || sudo apt install zenity
+```
+
+**Диалог ввода задачи виден, но окно не получает фокус**
+
+Это защита от перехвата фокуса в Cinnamon/Mutter: окно, открытое фоновым процессом трея, не активируется автоматически. Таймер сам активирует окно через `wmctrl` — убедитесь, что пакет установлен:
+```bash
+which wmctrl || sudo apt install wmctrl
+```
+
+**Диалог в фокусе, курсор в поле, но клавиатура и Ctrl+V не работают вообще**
+
+Обычно это сломанный IBus: после очистки `~/.cache` демон `ibus-daemon` продолжает работать, но его unix-сокет (на который указывает `~/.config/ibus/bus/*`) исчезает, и GTK-приложения (включая zenity) не могут достучаться до input method — ввод не проходит совсем. Проверить:
+```bash
+cat ~/.config/ibus/bus/*        # смотрим путь IBUS_ADDRESS=unix:path=...
+ls -la "$(echo $(cat ~/.config/ibus/bus/* | grep IBUS_ADDRESS | sed 's/.*path=\([^,]*\).*/\1/'))"
+# если файла нет — сокет мёртв
+```
+Таймер обходит эту проблему, принудительно запуская zenity с `GTK_IM_MODULE=gtk-im-context-simple` (не зависит от IBus). Если проблема всё же проявляется в других приложениях, помогает перезапуск IBus:
+```bash
+ibus-daemon -drxR
 ```
 
 **Уведомления не показываются**

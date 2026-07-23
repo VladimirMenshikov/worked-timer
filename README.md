@@ -4,14 +4,14 @@
 
 ## Возможности
 
-- **Старт / стоп** — ввод названия задачи через диалог, логирование в Supabase
+- **Старт / пауза / стоп** — ввод названия задачи через диалог, логирование в Supabase; пауза не засчитывается в затраченное время
 - **Статистика за сегодня** — таблица сессий с временем и итогом
 - **Отчёт за неделю и месяц** — сохранение `.md`-файла с разбивкой по дням, запоминает последнюю папку сохранения
 - **Автозапуск** — скрипт создаёт `~/.config/autostart/work-timer.desktop`
 
 ## Стек
 
-Python 3.12 · pystray (ayatana-appindicator) · Pillow · supabase-py · python-dotenv · zenity · notify-send
+Python 3.12 · pystray (ayatana-appindicator) · Pillow · supabase-py · python-dotenv · zenity · notify-send · wmctrl
 
 ## Быстрый старт
 
@@ -19,7 +19,7 @@ Python 3.12 · pystray (ayatana-appindicator) · Pillow · supabase-py · python
 # 1. Системные зависимости
 sudo apt install python3-gi python3-gi-cairo \
     gir1.2-ayatanaappindicator3-0.1 libayatana-appindicator3-1 \
-    libnotify-bin zenity
+    libnotify-bin zenity wmctrl
 
 # 2. Виртуальное окружение
 /usr/bin/python3 -m venv .venv --system-site-packages
@@ -38,15 +38,15 @@ cp .env.example .env
 
 ## Структура таблицы Supabase
 
-Таблица `wh_work_log`. Каждая сессия — пара строк `start` / `stop`, связанных по `session_id`.
+Таблица `wh_work_log`. Каждая сессия — цепочка строк `start` → (`pause` / `resume`)* → `stop`, связанных по `session_id`.
 
 | Поле | Тип | Описание |
 |------|-----|----------|
-| `session_id` | uuid | Связывает start и stop |
-| `operation` | varchar(5) | `start` или `stop` |
+| `session_id` | uuid | Связывает все события одной сессии |
+| `operation` | varchar(6) | `start`, `pause`, `resume` или `stop` |
 | `task` | text | Название задачи |
 | `event_time` | timestamptz | Время события (UTC) |
-| `elapsed_time` | text | Затраченное время (только у `stop`) |
+| `elapsed_time` | text | Затраченное время без пауз (только у `stop`) |
 
 ## Безопасность
 

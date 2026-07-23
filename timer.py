@@ -6,7 +6,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
@@ -46,6 +48,7 @@ def _make_icon(r: int, g: int, b: int, size: int = 64) -> Image.Image:
 
 ICON_IDLE    = _make_icon(55, 185, 55)    # зелёный — ожидание
 ICON_RUNNING = _make_icon(215, 45, 45)   # красный — таймер работает
+ICON_PAUSED  = _make_icon(230, 165, 20)  # жёлтый — таймер на паузе
 
 
 def format_elapsed(total_seconds: int) -> str:
@@ -59,20 +62,81 @@ def format_elapsed(total_seconds: int) -> str:
     return f"{s} сек."
 
 
+def _session_status(events: list, now: datetime) -> tuple:
+    """Считает суммарное активное время сессии по цепочке событий.
+
+    events — записи одной session_id, отсортированные по event_time
+    (operation ∈ start/pause/resume/stop). Паузы вычитаются из
+    затраченного времени. Возвращает (elapsed_sec, status), где
+    status ∈ 'running' | 'paused' | 'stopped'.
+    """
+    segment_start = None
+    elapsed = 0.0
+    status = "stopped"
+    for ev in events:
+        op = ev["operation"]
+        t = ev["event_time"]
+        if op in ("start", "resume"):
+            segment_start = t
+        elif op in ("pause", "stop"):
+            if segment_start is not None:
+                elapsed += (t - segment_start).total_seconds()
+                segment_start = None
+            status = "paused" if op == "pause" else "stopped"
+    if segment_start is not None:
+        elapsed += (now - segment_start).total_seconds()
+        status = "running"
+    return int(elapsed), status
+
+
+def _zenity_env() -> dict:
+    """Окружение для запуска zenity в обход сломанного сокета IBus.
+
+    После очистки ~/.cache/ibus демон IBus остаётся запущен, но его
+    unix-сокет исчезает — GTK-приложения пытаются подключиться к нему и
+    не получают вообще никакого ввода с клавиатуры (ни печать, ни Ctrl+V).
+    Принудительный gtk-im-context-simple не зависит от IBus.
+    """
+    env = os.environ.copy()
+    env["GTK_IM_MODULE"] = "gtk-im-context-simple"
+    return env
+
+
+def _focus_window(title: str, timeout: float = 2.0) -> None:
+    """Принудительно активирует окно по заголовку.
+
+    Диалоги zenity, запущенные из фонового потока трея, не получают фокус
+    из-за защиты от перехвата фокуса в Cinnamon/Mutter: окно видно, но
+    поле ввода не реагирует на клавиатуру, пока фокус не передан вручную.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True)
+        if title in found.stdout:
+            subprocess.run(["wmctrl", "-a", title], capture_output=True)
+            return
+        time.sleep(0.1)
+
+
 def ask_task() -> Optional[str]:
     """Открывает диалог zenity для ввода задачи."""
-    proc = subprocess.run(
+    title = "Work Timer — новая задача"
+    proc = subprocess.Popen(
         [
             "zenity", "--entry",
-            "--title=Work Timer",
+            f"--title={title}",
             "--text=Какую задачу вы сейчас решаете?",
             "--width=480",
         ],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
         text=True,
+        env=_zenity_env(),
     )
+    _focus_window(title)
+    stdout, _ = proc.communicate()
     if proc.returncode == 0:
-        return proc.stdout.strip() or None
+        return stdout.strip() or None
     return None
 
 
@@ -87,7 +151,10 @@ class WorkTimer:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.running = False
+        self.paused = False
         self.start_time: Optional[datetime] = None
+        self.segment_start: Optional[datetime] = None
+        self.accumulated_sec = 0.0
         self.task: Optional[str] = None
         self.session_id: Optional[str] = None
         self._busy = False
@@ -103,6 +170,7 @@ class WorkTimer:
         subprocess.run(
             ["zenity", "--error", "--title=Work Timer", f"--text={msg}", "--width=400"],
             capture_output=True,
+            env=_zenity_env(),
         )
         sys.exit(1)
 
@@ -111,7 +179,11 @@ class WorkTimer:
     def _menu_items(self):
         if self.running:
             yield pystray.MenuItem(self.task or "...", None, enabled=False)
-            yield pystray.MenuItem("⏹  Остановить таймер", self._stop_action, default=True)
+            if self.paused:
+                yield pystray.MenuItem("▶  Продолжить", self._resume_action, default=True)
+            else:
+                yield pystray.MenuItem("⏸  Пауза", self._pause_action, default=True)
+            yield pystray.MenuItem("⏹  Остановить таймер", self._stop_action)
         else:
             yield pystray.MenuItem("▶  Запустить таймер", self._start_action, default=True)
         yield pystray.MenuItem("📊  Статистика за сегодня", self._stats_action)
@@ -126,6 +198,12 @@ class WorkTimer:
 
     def _stop_action(self, icon: pystray.Icon, _) -> None:
         threading.Thread(target=self._do_stop, args=(icon,), daemon=True).start()
+
+    def _pause_action(self, icon: pystray.Icon, _) -> None:
+        threading.Thread(target=self._do_pause, args=(icon,), daemon=True).start()
+
+    def _resume_action(self, icon: pystray.Icon, _) -> None:
+        threading.Thread(target=self._do_resume, args=(icon,), daemon=True).start()
 
     def _stats_action(self, icon: pystray.Icon, _) -> None:
         threading.Thread(target=self._do_show_stats, daemon=True).start()
@@ -156,7 +234,10 @@ class WorkTimer:
 
             with self._lock:
                 self.running = True
+                self.paused = False
                 self.start_time = now
+                self.segment_start = now
+                self.accumulated_sec = 0.0
                 self.task = task
                 self.session_id = session_id
 
@@ -177,13 +258,16 @@ class WorkTimer:
                 return
             self._busy = True
             # захватываем значения пока держим лок
-            start_time = self.start_time
             task = self.task
             session_id = self.session_id
+            segment_start = self.segment_start
+            accumulated_sec = self.accumulated_sec
 
         try:
             now = datetime.now(timezone.utc)
-            elapsed_sec = int((now - start_time).total_seconds())
+            if segment_start is not None:
+                accumulated_sec += (now - segment_start).total_seconds()
+            elapsed_sec = int(accumulated_sec)
             elapsed_str = format_elapsed(elapsed_sec)
 
             self._db.table(TABLE).insert({
@@ -196,7 +280,10 @@ class WorkTimer:
 
             with self._lock:
                 self.running = False
+                self.paused = False
                 self.start_time = None
+                self.segment_start = None
+                self.accumulated_sec = 0.0
                 self.task = None
                 self.session_id = None
 
@@ -204,6 +291,77 @@ class WorkTimer:
             icon.title = "Work Timer"
             icon.update_menu()
             notify("Таймер остановлен", f"Задача: {task}\nЗатрачено: {elapsed_str}")
+
+        except Exception as exc:
+            notify("Ошибка Work Timer", str(exc))
+        finally:
+            with self._lock:
+                self._busy = False
+
+    def _do_pause(self, icon: pystray.Icon) -> None:
+        with self._lock:
+            if not self.running or self.paused or self._busy:
+                return
+            self._busy = True
+            task = self.task
+            session_id = self.session_id
+            segment_start = self.segment_start
+
+        try:
+            now = datetime.now(timezone.utc)
+            accumulated_sec = self.accumulated_sec
+            if segment_start is not None:
+                accumulated_sec += (now - segment_start).total_seconds()
+
+            self._db.table(TABLE).insert({
+                "session_id": session_id,
+                "operation": "pause",
+                "task": task,
+                "event_time": now.isoformat(),
+            }).execute()
+
+            with self._lock:
+                self.paused = True
+                self.segment_start = None
+                self.accumulated_sec = accumulated_sec
+
+            icon.icon = ICON_PAUSED
+            icon.title = f"⏸ {task}"
+            icon.update_menu()
+            notify("Таймер на паузе", f"Задача: {task}")
+
+        except Exception as exc:
+            notify("Ошибка Work Timer", str(exc))
+        finally:
+            with self._lock:
+                self._busy = False
+
+    def _do_resume(self, icon: pystray.Icon) -> None:
+        with self._lock:
+            if not self.running or not self.paused or self._busy:
+                return
+            self._busy = True
+            task = self.task
+            session_id = self.session_id
+
+        try:
+            now = datetime.now(timezone.utc)
+
+            self._db.table(TABLE).insert({
+                "session_id": session_id,
+                "operation": "resume",
+                "task": task,
+                "event_time": now.isoformat(),
+            }).execute()
+
+            with self._lock:
+                self.paused = False
+                self.segment_start = now
+
+            icon.icon = ICON_RUNNING
+            icon.title = f"▶ {task}"
+            icon.update_menu()
+            notify("Таймер продолжен", f"Задача: {task}")
 
         except Exception as exc:
             notify("Ошибка Work Timer", str(exc))
@@ -238,24 +396,31 @@ class WorkTimer:
                 ["zenity", "--info", "--title=Статистика",
                  "--text=Сегодня нет записей.", "--width=300"],
                 capture_output=True,
+                env=_zenity_env(),
             )
             return
 
         session_ids = [r["session_id"] for r in starts_res.data]
         try:
-            stops_res = (
+            all_res = (
                 self._db.table(TABLE)
                 .select("*")
-                .eq("operation", "stop")
                 .in_("session_id", session_ids)
+                .order("event_time")
                 .execute()
             )
         except Exception as exc:
             notify("Ошибка статистики", str(exc))
             return
 
-        stops = {r["session_id"]: r for r in stops_res.data}
+        events_by_session = defaultdict(list)
+        for r in all_res.data:
+            events_by_session[r["session_id"]].append({
+                "operation": r["operation"],
+                "event_time": datetime.fromisoformat(r["event_time"]),
+            })
 
+        now_utc = datetime.now(timezone.utc)
         rows = []
         total_sec = 0
 
@@ -265,21 +430,25 @@ class WorkTimer:
             start_dt = datetime.fromisoformat(start["event_time"])
             start_str = start_dt.astimezone().strftime("%H:%M:%S")
 
-            stop = stops.get(sid)
-            if stop:
-                stop_dt = datetime.fromisoformat(stop["event_time"])
-                elapsed_sec = int((stop_dt - start_dt).total_seconds())
-                total_sec += elapsed_sec
-                elapsed_str = format_elapsed(elapsed_sec)
-                stop_str = stop_dt.astimezone().strftime("%H:%M:%S")
-            elif sid == self.session_id and self.start_time:
-                cur_sec = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
-                total_sec += cur_sec
-                elapsed_str = f"▶ {format_elapsed(cur_sec)}"
-                stop_str = "—"
+            events = events_by_session.get(sid, [])
+            elapsed_sec, status = _session_status(events, now_utc)
+            total_sec += elapsed_sec
+
+            if status == "running":
+                elapsed_str = f"▶ {format_elapsed(elapsed_sec)}"
+                stop_str = "▶"
+            elif status == "paused":
+                elapsed_str = f"⏸ {format_elapsed(elapsed_sec)}"
+                stop_str = "⏸"
             else:
-                elapsed_str = "?"
-                stop_str = "—"
+                elapsed_str = format_elapsed(elapsed_sec)
+                last_stop = next(
+                    (e for e in reversed(events) if e["operation"] == "stop"), None
+                )
+                stop_str = (
+                    last_stop["event_time"].astimezone().strftime("%H:%M:%S")
+                    if last_stop else "—"
+                )
 
             rows.append((task, start_str, stop_str, elapsed_str))
 
@@ -325,6 +494,7 @@ class WorkTimer:
                     "--ok-label=Закрыть",
                 ],
                 capture_output=True,
+                env=_zenity_env(),
             )
         finally:
             os.unlink(tmp_path)
@@ -355,6 +525,7 @@ class WorkTimer:
             ],
             capture_output=True,
             text=True,
+            env=_zenity_env(),
         )
         if proc.returncode != 0:
             return None
@@ -378,47 +549,46 @@ class WorkTimer:
             return []
 
         session_ids = [r["session_id"] for r in starts_res.data]
-        stops_res = (
+        all_res = (
             self._db.table(TABLE)
             .select("*")
-            .eq("operation", "stop")
             .in_("session_id", session_ids)
+            .order("event_time")
             .execute()
         )
-        stops = {r["session_id"]: r for r in stops_res.data}
 
+        events_by_session = defaultdict(list)
+        for r in all_res.data:
+            events_by_session[r["session_id"]].append({
+                "operation": r["operation"],
+                "event_time": datetime.fromisoformat(r["event_time"]),
+            })
+
+        now_utc = datetime.now(timezone.utc)
         sessions = []
         for start in starts_res.data:
             sid = start["session_id"]
             task = (start["task"] or "").strip()
             start_dt = datetime.fromisoformat(start["event_time"]).astimezone()
-            stop = stops.get(sid)
 
-            if stop:
-                stop_dt = datetime.fromisoformat(stop["event_time"]).astimezone()
-                elapsed_sec = int((stop_dt - start_dt).total_seconds())
-                active = False
-            elif sid == self.session_id and self.start_time is not None:
-                stop_dt = None
-                elapsed_sec = int((datetime.now(timezone.utc) - self.start_time).total_seconds())
-                active = True
-            else:
-                stop_dt = None
-                elapsed_sec = None
-                active = False
+            events = events_by_session.get(sid, [])
+            elapsed_sec, status = _session_status(events, now_utc)
+            last_stop = next(
+                (e for e in reversed(events) if e["operation"] == "stop"), None
+            )
+            stop_dt = last_stop["event_time"].astimezone() if last_stop else None
 
             sessions.append({
                 "task": task,
                 "start_dt": start_dt,
                 "stop_dt": stop_dt,
                 "elapsed_sec": elapsed_sec,
-                "active": active,
+                "status": status,
             })
 
         return sessions
 
     def _render_report_section(self, title: str, date_range: list, sessions: list) -> str:
-        from collections import defaultdict
         by_day: dict = defaultdict(list)
         for s in sessions:
             by_day[s["start_dt"].date()].append(s)
@@ -444,20 +614,21 @@ class WorkTimer:
             day_total = 0
             for s in day_sessions:
                 start_str = s["start_dt"].strftime("%H:%M")
-                if s["stop_dt"]:
-                    stop_str = s["stop_dt"].strftime("%H:%M")
-                elif s["active"]:
+                if s["status"] == "running":
                     stop_str = "▶"
+                elif s["status"] == "paused":
+                    stop_str = "⏸"
+                elif s["stop_dt"]:
+                    stop_str = s["stop_dt"].strftime("%H:%M")
                 else:
                     stop_str = "—"
 
-                if s["elapsed_sec"] is not None:
-                    elapsed = format_elapsed(s["elapsed_sec"])
-                    if s["active"]:
-                        elapsed = f"▶ {elapsed}"
-                    day_total += s["elapsed_sec"]
-                else:
-                    elapsed = "?"
+                elapsed = format_elapsed(s["elapsed_sec"])
+                if s["status"] == "running":
+                    elapsed = f"▶ {elapsed}"
+                elif s["status"] == "paused":
+                    elapsed = f"⏸ {elapsed}"
+                day_total += s["elapsed_sec"]
 
                 task = s["task"].replace("|", "\\|") or "—"
                 lines.append(f"| {task} | {start_str} | {stop_str} | {elapsed} |")
