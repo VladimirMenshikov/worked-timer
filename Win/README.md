@@ -27,17 +27,19 @@ Linux-версия использует системные утилиты Cinnam
 install.bat
 ```
 
-Скрипт создаст виртуальное окружение `.venv`, поставит зависимости из `requirements.txt` (включая `psycopg2-binary` для PostgreSQL) и скопирует `.env.example` в `.env`.
+Скрипт создаст виртуальное окружение `.venv`, поставит зависимости из `requirements.txt` (включая `psycopg2-binary` для PostgreSQL) (настройки БД мастер сохранит в `%APPDATA%\WorkTimer\.env`).
 
 ## Настройка подключения к БД
 
 При первом запуске `run.bat`/`run_debug.bat` появится мастер настройки:
 
-1. Выбор способа подключения — **Supabase** или **PostgreSQL** (прямое подключение).
+1. Выбор способа подключения — **локальная PostgreSQL** (приложение само создаст БД `work_timer` и пользователя `work_timer_app`; нужен пароль суперпользователя `postgres`, он нигде не сохраняется), **Supabase** или **PostgreSQL на другом сервере**.
 2. **Supabase**: `SUPABASE_URL` и `SUPABASE_KEY` (Project Settings → API). Поле `DATABASE_URL` необязательно — если заполнить его строкой подключения к Postgres того же проекта (Project Settings → Database), миграции будут применяться автоматически.
 3. **PostgreSQL**: строка подключения `DATABASE_URL` вида `postgresql://user:password@host:port/dbname` — используется и для обычной работы, и для автомиграций.
 
-Введённые данные сохраняются в `.env` (`DB_BACKEND=supabase|postgres` + соответствующие поля), мастер больше не появляется. Если задан `DATABASE_URL`, при каждом запуске приложение само проверяет и применяет ещё не применённые файлы из `sql/migrations`.
+Плановые часы (`wh_plan_work_hourses`) добавляются в локальном веб-интерфейсе (пункт трея «Открыть в браузере» → «Плановые часы»): вручную или импортом списка — см. корневой README.
+
+Введённые данные сохраняются в `%APPDATA%\WorkTimer\.env` (`DB_BACKEND=supabase|postgres` + соответствующие поля), мастер больше не появляется. Если задан `DATABASE_URL`, при каждом запуске приложение само проверяет и применяет ещё не применённые файлы из `sql/migrations`.
 
 Если `.env` уже содержит рабочие `SUPABASE_URL`/`SUPABASE_KEY` от версии до появления мастера — он не запустится, `DB_BACKEND=supabase` проставится автоматически.
 
@@ -71,7 +73,7 @@ Win/
 ├── db_backend.py     — доступ к БД (Supabase REST или прямой PostgreSQL) и автомиграции
 ├── sql/migrations/   — файлы миграций (копия корневых, применяются автоматически)
 ├── requirements.txt   — зависимости
-├── .env.example       — шаблон конфигурации
+├── wizard.py / app_config.py / report_core.py / web_server.py / web_page.py — мастер, конфиг, логика отчётов, локальный веб
 ├── install.bat        — установка venv + зависимостей
 ├── run.bat            — запуск без консоли
 ├── run_debug.bat       — запуск с консолью (для отладки)

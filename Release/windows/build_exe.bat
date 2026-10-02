@@ -11,16 +11,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [1/3] Creating build environment...
+echo [1/2] Creating build environment...
 python -m venv build_venv
 call build_venv\Scripts\pip.exe install --quiet --upgrade pip
 call build_venv\Scripts\pip.exe install --quiet -r "%SRC_DIR%\requirements.txt" pyinstaller
 
-echo [2/3] Building WorkTimer.exe...
+echo [2/2] Building WorkTimer.exe...
 call build_venv\Scripts\pyinstaller.exe --noconfirm --clean work-timer.spec
 
-echo [3/3] Copying .env.example...
-copy /y "%SRC_DIR%\.env.example" "dist\.env.example" >nul
 
 echo.
 echo === Done ===

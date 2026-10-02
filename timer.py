@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import uuid
+import webbrowser
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -25,17 +26,23 @@ MONTHS_NOM_RU = {
 }
 DAYS_RU = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
 
-CONFIG_DIR = Path.home() / ".config" / "work-timer"
-LAST_PATH_FILE = CONFIG_DIR / "last_report_path.txt"
-
 import pystray
 from PIL import Image, ImageDraw
-from dotenv import load_dotenv, set_key
 
+import app_config
 import db_backend
+import web_server
+from report_core import (
+    find_active_session,
+    format_elapsed,
+    parse_dt,
+    session_status as _session_status,
+)
+from wizard import SetupCancelled, needs_db_setup, run_setup_wizard, zenity_env as _zenity_env
 
-ENV_PATH = Path(__file__).parent / ".env"
-load_dotenv(ENV_PATH)
+CONFIG_DIR = app_config.CONFIG_DIR
+LAST_PATH_FILE = CONFIG_DIR / "last_report_path.txt"
+app_config.load_env()
 
 
 def _make_icon(r: int, g: int, b: int, size: int = 64) -> Image.Image:
@@ -49,57 +56,6 @@ def _make_icon(r: int, g: int, b: int, size: int = 64) -> Image.Image:
 ICON_IDLE    = _make_icon(55, 185, 55)    # зелёный — ожидание
 ICON_RUNNING = _make_icon(215, 45, 45)   # красный — таймер работает
 ICON_PAUSED  = _make_icon(230, 165, 20)  # жёлтый — таймер на паузе
-
-
-def format_elapsed(total_seconds: int) -> str:
-    h = total_seconds // 3600
-    m = (total_seconds % 3600) // 60
-    s = total_seconds % 60
-    if h > 0:
-        return f"{h} час. {m} мин. {s} сек."
-    if m > 0:
-        return f"{m} мин. {s} сек."
-    return f"{s} сек."
-
-
-def _session_status(events: list, now: datetime) -> tuple:
-    """Считает суммарное активное время сессии по цепочке событий.
-
-    events — записи одной session_id, отсортированные по event_time
-    (operation ∈ start/pause/resume/stop). Паузы вычитаются из
-    затраченного времени. Возвращает (elapsed_sec, status), где
-    status ∈ 'running' | 'paused' | 'stopped'.
-    """
-    segment_start = None
-    elapsed = 0.0
-    status = "stopped"
-    for ev in events:
-        op = ev["operation"]
-        t = ev["event_time"]
-        if op in ("start", "resume"):
-            segment_start = t
-        elif op in ("pause", "stop"):
-            if segment_start is not None:
-                elapsed += (t - segment_start).total_seconds()
-                segment_start = None
-            status = "paused" if op == "pause" else "stopped"
-    if segment_start is not None:
-        elapsed += (now - segment_start).total_seconds()
-        status = "running"
-    return int(elapsed), status
-
-
-def _zenity_env() -> dict:
-    """Окружение для запуска zenity в обход сломанного сокета IBus.
-
-    После очистки ~/.cache/ibus демон IBus остаётся запущен, но его
-    unix-сокет исчезает — GTK-приложения пытаются подключиться к нему и
-    не получают вообще никакого ввода с клавиатуры (ни печать, ни Ctrl+V).
-    Принудительный gtk-im-context-simple не зависит от IBus.
-    """
-    env = os.environ.copy()
-    env["GTK_IM_MODULE"] = "gtk-im-context-simple"
-    return env
 
 
 def _focus_window(title: str, timeout: float = 2.0) -> None:
@@ -147,6 +103,14 @@ def notify(title: str, body: str) -> None:
     )
 
 
+def explain_db_error(exc: Exception) -> str:
+    text = str(exc)
+    if "wh_work_log_operation_check" in text:
+        return ("В БД не применена миграция 0003_AddPauseResumeOperations "
+                "(операции pause/resume). Примените её — см. sql/migrations.\n" + text)
+    return text
+
+
 def fatal_error(msg: str) -> None:
     subprocess.run(
         ["zenity", "--error", "--title=Work Timer", f"--text={msg}", "--width=400"],
@@ -154,88 +118,6 @@ def fatal_error(msg: str) -> None:
         env=_zenity_env(),
     )
     sys.exit(1)
-
-
-def _needs_db_setup() -> bool:
-    backend = os.environ.get("DB_BACKEND", "").strip().lower()
-
-    if backend not in ("supabase", "postgres"):
-        # Обратная совместимость: .env уже содержит рабочие Supabase-креды
-        # из версии приложения до появления DB_BACKEND — не переспрашиваем.
-        if os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"):
-            set_key(ENV_PATH, "DB_BACKEND", "supabase")
-            load_dotenv(ENV_PATH, override=True)
-            return False
-        return True
-
-    if backend == "supabase":
-        return not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"))
-    return not os.environ.get("DATABASE_URL")
-
-
-def run_setup_wizard() -> None:
-    """Мастер первого запуска: выбор Supabase или PostgreSQL, ввод реквизитов в .env."""
-    choice = subprocess.run(
-        [
-            "zenity", "--list", "--radiolist",
-            "--title=Work Timer — настройка подключения к БД",
-            "--text=Выберите способ подключения к базе данных:",
-            "--column=", "--column=Вариант",
-            "--print-column=2", "--hide-header",
-            "TRUE", "Supabase",
-            "FALSE", "PostgreSQL (прямое подключение)",
-            "--width=460", "--height=220",
-        ],
-        capture_output=True, text=True, env=_zenity_env(),
-    )
-    label = choice.stdout.strip()
-    if choice.returncode != 0 or not label:
-        fatal_error("Настройка БД не завершена — подключение не задано.")
-
-    if label.startswith("Supabase"):
-        form = subprocess.run(
-            [
-                "zenity", "--forms",
-                "--title=Work Timer — Supabase",
-                "--text=Данные подключения Supabase (Project Settings → API)",
-                "--add-entry=SUPABASE_URL",
-                "--add-entry=SUPABASE_KEY (anon key)",
-                "--add-entry=DATABASE_URL (необязательно — для автомиграций, Project Settings → Database)",
-                "--width=560",
-            ],
-            capture_output=True, text=True, env=_zenity_env(),
-        )
-        if form.returncode != 0:
-            fatal_error("Настройка БД не завершена.")
-        parts = (form.stdout.rstrip("\n").split("|") + ["", "", ""])[:3]
-        url, key, dsn = (p.strip() for p in parts)
-        if not url or not key:
-            fatal_error("SUPABASE_URL и SUPABASE_KEY обязательны.")
-        set_key(ENV_PATH, "DB_BACKEND", "supabase")
-        set_key(ENV_PATH, "SUPABASE_URL", url)
-        set_key(ENV_PATH, "SUPABASE_KEY", key)
-        if dsn:
-            set_key(ENV_PATH, "DATABASE_URL", dsn)
-    else:
-        form = subprocess.run(
-            [
-                "zenity", "--forms",
-                "--title=Work Timer — PostgreSQL",
-                "--text=Строка подключения PostgreSQL",
-                "--add-entry=DATABASE_URL (postgresql://user:password@host:port/dbname)",
-                "--width=560",
-            ],
-            capture_output=True, text=True, env=_zenity_env(),
-        )
-        if form.returncode != 0:
-            fatal_error("Настройка БД не завершена.")
-        dsn = form.stdout.strip()
-        if not dsn:
-            fatal_error("DATABASE_URL обязателен.")
-        set_key(ENV_PATH, "DB_BACKEND", "postgres")
-        set_key(ENV_PATH, "DATABASE_URL", dsn)
-
-    load_dotenv(ENV_PATH, override=True)
 
 
 class WorkTimer:
@@ -249,11 +131,50 @@ class WorkTimer:
         self.task: Optional[str] = None
         self.session_id: Optional[str] = None
         self._busy = False
+        self.web_url: Optional[str] = None
+        self.web_error: Optional[str] = None
 
         try:
             self._db = db_backend.create_backend(os.environ)
         except RuntimeError as exc:
             fatal_error(str(exc))
+
+        try:
+            self.web_url = web_server.start(self._db)
+        except Exception as exc:
+            self.web_error = str(exc)
+
+    def _restore_active_session(self, icon: pystray.Icon) -> None:
+        """Подхватывает незавершённую сессию после перезапуска приложения.
+
+        Без этого после рестарта трей показывает «Запустить таймер», а пункты
+        «Пауза/Остановить» недоступны, хотя в БД сессия всё ещё идёт.
+        """
+        try:
+            active = find_active_session(
+                self._db, datetime.now(timezone.utc) - timedelta(days=7)
+            )
+        except Exception as exc:
+            notify("Не удалось восстановить таймер", str(exc))
+            return
+        if not active:
+            return
+        now = datetime.now(timezone.utc)
+        running = active["status"] == "running"
+        with self._lock:
+            self.running = True
+            self.paused = not running
+            self.start_time = active["start_time"]
+            self.segment_start = active["segment_start"] if running else None
+            self.accumulated_sec = active["elapsed_sec"] - (
+                (now - active["segment_start"]).total_seconds() if running else 0
+            )
+            self.task = active["task"]
+            self.session_id = active["session_id"]
+        icon.icon = ICON_RUNNING if running else ICON_PAUSED
+        icon.title = f"{'▶' if running else '⏸'} {active['task']}"
+        icon.update_menu()
+        notify("Таймер восстановлен", f"Задача: {active['task']}")
 
     # ------------------------------------------------------------------ меню
 
@@ -268,6 +189,7 @@ class WorkTimer:
         else:
             yield pystray.MenuItem("▶  Запустить таймер", self._start_action, default=True)
         yield pystray.MenuItem("📊  Статистика за сегодня", self._stats_action)
+        yield pystray.MenuItem("🌐  Открыть в браузере", self._web_action)
         yield pystray.MenuItem("📄  Сохранить отчёт (.md)", self._report_action)
         yield pystray.Menu.SEPARATOR
         yield pystray.MenuItem("Выход", lambda icon, _: icon.stop())
@@ -288,6 +210,12 @@ class WorkTimer:
 
     def _stats_action(self, icon: pystray.Icon, _) -> None:
         threading.Thread(target=self._do_show_stats, daemon=True).start()
+
+    def _web_action(self, icon: pystray.Icon, _) -> None:
+        if self.web_url:
+            webbrowser.open(self.web_url)
+        else:
+            notify("Веб-интерфейс недоступен", self.web_error or "сервер не запущен")
 
     def _report_action(self, icon: pystray.Icon, _) -> None:
         threading.Thread(target=self._do_generate_report, daemon=True).start()
@@ -412,7 +340,7 @@ class WorkTimer:
             notify("Таймер на паузе", f"Задача: {task}")
 
         except Exception as exc:
-            notify("Ошибка Work Timer", str(exc))
+            notify("Ошибка Work Timer", explain_db_error(exc))
         finally:
             with self._lock:
                 self._busy = False
@@ -445,7 +373,7 @@ class WorkTimer:
             notify("Таймер продолжен", f"Задача: {task}")
 
         except Exception as exc:
-            notify("Ошибка Work Timer", str(exc))
+            notify("Ошибка Work Timer", explain_db_error(exc))
         finally:
             with self._lock:
                 self._busy = False
@@ -485,7 +413,7 @@ class WorkTimer:
         for r in all_events:
             events_by_session[r["session_id"]].append({
                 "operation": r["operation"],
-                "event_time": datetime.fromisoformat(r["event_time"]),
+                "event_time": parse_dt(r["event_time"]),
             })
 
         now_utc = datetime.now(timezone.utc)
@@ -495,7 +423,7 @@ class WorkTimer:
         for start in starts:
             sid = start["session_id"]
             task = (start["task"] or "").strip()
-            start_dt = datetime.fromisoformat(start["event_time"])
+            start_dt = parse_dt(start["event_time"])
             start_str = start_dt.astimezone().strftime("%H:%M:%S")
 
             events = events_by_session.get(sid, [])
@@ -616,7 +544,7 @@ class WorkTimer:
         for r in all_events:
             events_by_session[r["session_id"]].append({
                 "operation": r["operation"],
-                "event_time": datetime.fromisoformat(r["event_time"]),
+                "event_time": parse_dt(r["event_time"]),
             })
 
         now_utc = datetime.now(timezone.utc)
@@ -624,7 +552,7 @@ class WorkTimer:
         for start in starts:
             sid = start["session_id"]
             task = (start["task"] or "").strip()
-            start_dt = datetime.fromisoformat(start["event_time"]).astimezone()
+            start_dt = parse_dt(start["event_time"]).astimezone()
 
             events = events_by_session.get(sid, [])
             elapsed_sec, status = _session_status(events, now_utc)
@@ -774,12 +702,17 @@ class WorkTimer:
             title="Work Timer",
             menu=pystray.Menu(self._menu_items),
         )
-        icon.run()
+        icon.run(setup=lambda i: (setattr(i, "visible", True), self._restore_active_session(i)))
 
 
 def main() -> None:
-    if _needs_db_setup():
-        run_setup_wizard()
+    app_config.load_env()
+    if needs_db_setup():
+        try:
+            run_setup_wizard()
+        except SetupCancelled as exc:
+            fatal_error(str(exc))
+            return
 
     dsn = os.environ.get("DATABASE_URL", "").strip()
     if dsn:

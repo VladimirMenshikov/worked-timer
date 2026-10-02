@@ -3,7 +3,7 @@
 ; Prerequisite: run build_exe.bat first to produce dist\WorkTimer.exe
 
 #define MyAppName "Work Timer"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.2.0"
 #define MyAppPublisher "VladimirMenshikov"
 #define MyAppExeName "WorkTimer.exe"
 
@@ -32,7 +32,6 @@ Name: "desktopicon"; Description: "Создать значок на рабоче
 
 [Files]
 Source: "dist\WorkTimer.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\.env.example"; DestDir: "{app}"; DestName: ".env.example"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Work Timer"; Filename: "{app}\WorkTimer.exe"

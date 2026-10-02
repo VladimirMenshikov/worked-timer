@@ -80,7 +80,7 @@ cd /путь/к/ai-worked-timer
 ai-worked-timer/
 ├── timer.py          — основное приложение
 ├── db_backend.py     — доступ к БД (Supabase REST или прямой PostgreSQL) и автомиграции
-├── .env              — данные подключения к БД (заполняется мастером первого запуска)
+~/.config/work-timer/.env — данные подключения к БД (заполняется мастером первого запуска)
 ├── requirements.txt  — Python-зависимости
 ├── create_table.sql  — SQL для создания таблицы (минимальная схема, без миграций)
 ├── sql/migrations/   — файлы миграций, применяются автоматически при старте
@@ -121,7 +121,7 @@ curl -sS https://bootstrap.pypa.io/get-pip.py | .venv/bin/python
 2. **Supabase**: введите `SUPABASE_URL` и `SUPABASE_KEY` (Project Settings → API). Поле `DATABASE_URL` необязательно — если заполнить его строкой подключения к Postgres того же проекта (Project Settings → Database), приложение сможет применять миграции автоматически; без него миграции нужно будет применить вручную.
 3. **PostgreSQL**: введите строку подключения `DATABASE_URL` вида `postgresql://user:password@host:port/dbname`. Она используется и для обычной работы (start/pause/resume/stop, статистика, отчёты), и для автомиграций.
 
-Мастер сохраняет введённые данные в `.env` (переменная `DB_BACKEND=supabase|postgres` + соответствующие поля) и больше не появляется — если нужно сменить БД, отредактируйте `.env` вручную.
+Мастер сохраняет введённые данные в `~/.config/work-timer/.env` (переменная `DB_BACKEND=supabase|postgres` + соответствующие поля) и больше не появляется — если нужно сменить БД, отредактируйте `.env` вручную.
 
 > Если `.env` уже содержит рабочие `SUPABASE_URL`/`SUPABASE_KEY` от версии приложения до появления этого мастера — он не запустится, `DB_BACKEND=supabase` проставится автоматически при первом запуске.
 

@@ -15,7 +15,7 @@ a = Analysis(
     datas=[
         (os.path.join(SRC_DIR, "sql", "migrations"), os.path.join("sql", "migrations")),
     ],
-    hiddenimports=["pystray._win32"],
+    hiddenimports=["pystray._win32", "psycopg2", "supabase"],
     hookspath=[],
     runtime_hooks=[],
     excludes=[],

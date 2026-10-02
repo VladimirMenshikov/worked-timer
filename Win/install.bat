@@ -19,18 +19,13 @@ echo [2/3] Installing Python dependencies...
 call .venv\Scripts\pip.exe install --quiet --upgrade pip
 call .venv\Scripts\pip.exe install --quiet -r requirements.txt
 
-echo [3/3] Preparing .env...
-if not exist .env (
-    copy .env.example .env >nul
-    echo Created .env - fill in SUPABASE_URL and SUPABASE_KEY before running.
-) else (
-    echo .env already exists, skipping.
-)
+echo [3/3] Finishing...
 
 echo.
 echo === Done! ===
 echo.
-echo Edit .env, then run:
-echo   run.bat
+echo Run run.bat - on first start the wizard will ask where to store data
+echo (local PostgreSQL / Supabase / remote PostgreSQL). Settings are saved to
+echo %%APPDATA%%\WorkTimer\.env
 echo.
 pause

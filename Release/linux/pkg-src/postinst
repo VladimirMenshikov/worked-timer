@@ -7,26 +7,39 @@ python3 -m venv "$APP_DIR/.venv" --system-site-packages
 "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
 "$APP_DIR/.venv/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
 
-if [ ! -f "$APP_DIR/.env" ]; then
-    cp "$APP_DIR/.env.example" "$APP_DIR/.env"
-    chmod 600 "$APP_DIR/.env"
-fi
-
 chmod +x "$APP_DIR/timer.py" "$APP_DIR/autostart.sh"
 
-cat <<'MSG'
+# Настройки (.env) хранятся в ~/.config/work-timer/ у каждого пользователя —
+# приложение не пишет в /opt/work-timer, менять владельца каталога не нужно.
+
+# Сразу запускаем приложение для пользователя, поставившего пакет (мастер
+# выбора БД откроется сам). Без графической сессии (ssh, GUI-установщик без
+# DISPLAY) просто пропускаем — приложение запускается из меню приложений.
+if [ "$1" = "configure" ] && [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ] && [ -n "$DISPLAY" ]; then
+    U_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    U_ID=$(id -u "$SUDO_USER")
+    pkill -u "$SUDO_USER" -f "$APP_DIR/timer.py" 2>/dev/null || true
+    runuser -u "$SUDO_USER" -- env \
+        HOME="$U_HOME" DISPLAY="$DISPLAY" XAUTHORITY="$U_HOME/.Xauthority" \
+        XDG_RUNTIME_DIR="/run/user/$U_ID" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$U_ID/bus" \
+        setsid -f "$APP_DIR/.venv/bin/python" "$APP_DIR/timer.py" >/dev/null 2>&1 || true
+    STARTED="Приложение запущено — следуйте мастеру настройки БД."
+else
+    STARTED="Запустите Work Timer через меню приложений."
+fi
+
+cat <<MSG
 
 === Work Timer установлен ===
 
-1. Запустите Work Timer через меню приложений, либо командой:
-   /opt/work-timer/.venv/bin/python /opt/work-timer/timer.py
-2. При первом запуске появится мастер настройки БД (Supabase или PostgreSQL) —
-   данные подключения сохранятся в /opt/work-timer/.env
-3. Если указана строка подключения PostgreSQL (DATABASE_URL), миграции из
-   /opt/work-timer/sql/migrations применятся автоматически. Без неё —
-   выполните их вручную по порядку в Supabase -> SQL Editor.
-4. Для автозапуска при входе в систему выполните:
-   bash /opt/work-timer/autostart.sh
+$STARTED
+
+ * Настройки хранятся в ~/.config/work-timer/.env (у каждого пользователя свои).
+ * Мастер предлагает: локальная PostgreSQL (создаст БД и пользователя сам),
+   Supabase либо PostgreSQL на другом сервере. Миграции применяются автоматически.
+ * Отчёт в браузере: пункт «Открыть в браузере» в меню иконки в трее.
+ * Автозапуск при входе в систему: bash /opt/work-timer/autostart.sh
 
 MSG
 

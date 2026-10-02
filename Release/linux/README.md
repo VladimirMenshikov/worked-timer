@@ -5,7 +5,7 @@
 ## Установка
 
 ```bash
-sudo apt install ./work-timer_1.1.0_all.deb
+sudo apt install ./work-timer_1.2.0_all.deb
 ```
 
 (`apt install ./...` сам подтянет недостающие системные зависимости — `python3-gi`, `zenity`, `libnotify-bin`, `wmctrl` и т.д.; при установке через `dpkg -i` их придётся доустанавливать вручную через `apt -f install`.)
@@ -14,7 +14,9 @@ sudo apt install ./work-timer_1.1.0_all.deb
 
 1. создаёт виртуальное окружение `/opt/work-timer/.venv`;
 2. ставит Python-зависимости из `requirements.txt`;
-3. создаёт `/opt/work-timer/.env` из шаблона (если ещё не существует).
+3. запускает приложение для вас — сразу открывается мастер выбора БД (если установка идёт без графической сессии, запустите «Work Timer» из меню приложений).
+
+Приложение **не пишет в `/opt/work-timer`**, менять владельца каталога не нужно: настройки каждого пользователя лежат в `~/.config/work-timer/.env`.
 
 ## Настройка после установки
 
@@ -22,7 +24,7 @@ sudo apt install ./work-timer_1.1.0_all.deb
    ```bash
    /opt/work-timer/.venv/bin/python /opt/work-timer/timer.py
    ```
-2. При первом запуске появится мастер настройки — выберите Supabase или PostgreSQL и введите данные подключения (подробности — в [`../../GUIDE.md`](../../GUIDE.md#3-настройка-подключения-к-бд)). Данные сохранятся в `/opt/work-timer/.env`.
+2. При первом запуске появится мастер настройки — выберите Supabase или PostgreSQL и введите данные подключения (подробности — в [`../../GUIDE.md`](../../GUIDE.md#3-настройка-подключения-к-бд)). Данные сохранятся в `~/.config/work-timer/.env`. Вариант «Локальная PostgreSQL» сам установит сервер (если его нет), создаст БД `work_timer` и пользователя `work_timer_app` — потребуется только пароль администратора в окне polkit.
 3. Если указана строка подключения PostgreSQL (`DATABASE_URL`), таблицы создадутся автоматически — миграции из `/opt/work-timer/sql/migrations` применяются при каждом запуске. Без неё выполните их вручную по порядку (0000 → далее) в Supabase → SQL Editor.
 4. Автозапуск при входе в систему:
    ```bash
@@ -31,13 +33,13 @@ sudo apt install ./work-timer_1.1.0_all.deb
 
 ## Обновление
 
-Установите новую версию `.deb` тем же способом — `postinst` переиспользует существующий `.env`.
+Установите новую версию `.deb` тем же способом — настройки из `~/.config/work-timer/.env` сохраняются (а `.env` от версии 1.2.0 в `/opt/work-timer` подхватится автоматически).
 
 ## Удаление
 
 ```bash
-sudo apt remove work-timer      # оставит .env и venv
-sudo apt purge work-timer       # удалит также .env, venv и автозапуск
+sudo apt remove work-timer      # оставит настройки и venv
+sudo apt purge work-timer       # удалит также venv (настройки в ~/.config/work-timer остаются)
 ```
 
 ## Пересборка пакета

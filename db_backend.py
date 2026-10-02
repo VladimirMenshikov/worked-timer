@@ -7,9 +7,16 @@
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 TABLE = "wh_work_log"
+PLAN_TABLE = "wh_plan_work_hourses"
 MIGRATIONS_DIR = Path(__file__).parent / "sql" / "migrations"
+
+
+def _plan_row(r) -> dict:
+    return {"year": int(r["year"]), "month": int(r["month"]),
+            "work_days": int(r["work_days"]), "work_hours": float(r["work_hours"])}
 
 
 class SupabaseBackend:
@@ -20,16 +27,40 @@ class SupabaseBackend:
     def insert_event(self, row: dict) -> None:
         self._client.table(TABLE).insert(row).execute()
 
-    def select_starts_since(self, from_dt_utc: datetime) -> list:
-        res = (
+    def select_starts_since(self, from_dt_utc: datetime, to_dt_utc: Optional[datetime] = None) -> list:
+        query = (
             self._client.table(TABLE)
             .select("*")
             .eq("operation", "start")
             .gte("event_time", from_dt_utc.isoformat())
-            .order("event_time")
+        )
+        if to_dt_utc is not None:
+            query = query.lt("event_time", to_dt_utc.isoformat())
+        return query.order("event_time").execute().data
+
+    def select_plan_hours(self, year: int, month: int) -> Optional[float]:
+        res = (
+            self._client.table(PLAN_TABLE)
+            .select("work_hours")
+            .eq("year", year)
+            .eq("month", month)
             .execute()
         )
-        return res.data
+        return float(res.data[0]["work_hours"]) if res.data else None
+
+    def select_plan_year(self, year: int) -> list:
+        res = (
+            self._client.table(PLAN_TABLE)
+            .select("year,month,work_days,work_hours")
+            .eq("year", year)
+            .order("month")
+            .execute()
+        )
+        return [_plan_row(r) for r in res.data]
+
+    def upsert_plan_hours(self, rows: list) -> None:
+        if rows:
+            self._client.table(PLAN_TABLE).upsert(rows, on_conflict="year,month").execute()
 
     def select_events_for_sessions(self, session_ids: list) -> list:
         if not session_ids:
@@ -78,17 +109,52 @@ class PostgresBackend:
                 )
             conn.commit()
 
-    def select_starts_since(self, from_dt_utc: datetime) -> list:
+    def select_starts_since(self, from_dt_utc: datetime, to_dt_utc: Optional[datetime] = None) -> list:
         import psycopg2.extras
         with self._connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     f"SELECT * FROM {TABLE} WHERE operation = 'start' "
-                    "AND event_time >= %s ORDER BY event_time",
-                    (from_dt_utc,),
+                    "AND event_time >= %s AND (%s::timestamptz IS NULL OR event_time < %s) "
+                    "ORDER BY event_time",
+                    (from_dt_utc, to_dt_utc, to_dt_utc),
                 )
                 rows = cur.fetchall()
         return [_row_to_dict(r) for r in rows]
+
+    def select_plan_hours(self, year: int, month: int) -> Optional[float]:
+        with self._connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT work_hours FROM {PLAN_TABLE} WHERE year = %s AND month = %s",
+                    (year, month),
+                )
+                row = cur.fetchone()
+        return float(row[0]) if row else None
+
+    def select_plan_year(self, year: int) -> list:
+        import psycopg2.extras
+        with self._connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    f"SELECT year, month, work_days, work_hours FROM {PLAN_TABLE} "
+                    "WHERE year = %s ORDER BY month",
+                    (year,),
+                )
+                return [_plan_row(r) for r in cur.fetchall()]
+
+    def upsert_plan_hours(self, rows: list) -> None:
+        with self._connection() as conn:
+            with conn.cursor() as cur:
+                for r in rows:
+                    cur.execute(
+                        f"INSERT INTO {PLAN_TABLE} (year, month, work_days, work_hours) "
+                        "VALUES (%s, %s, %s, %s) "
+                        "ON CONFLICT (year, month) DO UPDATE SET "
+                        "work_days = EXCLUDED.work_days, work_hours = EXCLUDED.work_hours",
+                        (r["year"], r["month"], r["work_days"], r["work_hours"]),
+                    )
+            conn.commit()
 
     def select_events_for_sessions(self, session_ids: list) -> list:
         if not session_ids:
@@ -97,7 +163,7 @@ class PostgresBackend:
         with self._connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
-                    f"SELECT * FROM {TABLE} WHERE session_id = ANY(%s) "
+                    f"SELECT * FROM {TABLE} WHERE session_id = ANY(%s::uuid[]) "
                     "ORDER BY event_time",
                     (session_ids,),
                 )
@@ -138,6 +204,15 @@ def run_pending_migrations(dsn: str) -> list:
     applied = []
     conn = psycopg2.connect(dsn)
     try:
+        # Миграции 0001/0002 выдают политики роли anon (в Supabase она есть всегда).
+        # В обычной PostgreSQL её нет — создаём без прав и входа; если у пользователя
+        # нет CREATEROLE, пропускаем (роль могла быть создана при bootstrap).
+        with conn.cursor() as cur:
+            cur.execute(
+                "DO $$ BEGIN CREATE ROLE anon NOLOGIN; "
+                "EXCEPTION WHEN duplicate_object OR insufficient_privilege THEN NULL; END $$"
+            )
+        conn.commit()
         with conn.cursor() as cur:
             cur.execute("SELECT to_regclass('public.schema_migrations')")
             has_tracking = cur.fetchone()[0] is not None
@@ -160,3 +235,84 @@ def run_pending_migrations(dsn: str) -> list:
         conn.close()
 
     return applied
+
+
+# ---------------------------------------------------------- локальная PostgreSQL
+
+LOCAL_DB = "work_timer"
+LOCAL_ROLE = "work_timer_app"
+
+
+def port_open(host: str = "127.0.0.1", port: int = 5432, timeout: float = 1.0) -> bool:
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def generate_password() -> str:
+    import secrets
+    return secrets.token_hex(16)
+
+
+def build_local_dsn(password: str, host: str = "127.0.0.1", port: int = 5432) -> str:
+    return f"postgresql://{LOCAL_ROLE}:{password}@{host}:{port}/{LOCAL_DB}"
+
+
+def bootstrap_with_superuser(host: str, port: int, user: str, password: str) -> str:
+    """Создаёт роль и БД проекта от имени суперпользователя PostgreSQL.
+
+    Аналог sql/bootstrap/0000_CreateUserAndDatabase.sql для случая, когда есть
+    TCP-доступ с паролем (Windows). Идемпотентно. Возвращает DATABASE_URL
+    созданного пользователя проекта.
+    """
+    import psycopg2
+    from psycopg2 import sql
+
+    app_password = generate_password()
+
+    def connect(dbname: str):
+        conn = psycopg2.connect(host=host, port=port, user=user, password=password,
+                                dbname=dbname, connect_timeout=5)
+        conn.autocommit = True  # CREATE DATABASE нельзя выполнять в транзакции
+        return conn
+
+    conn = connect("postgres")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (LOCAL_ROLE,))
+            verb = "ALTER" if cur.fetchone() else "CREATE"
+            cur.execute(sql.SQL(verb + " ROLE {} WITH LOGIN PASSWORD {}").format(
+                sql.Identifier(LOCAL_ROLE), sql.Literal(app_password)))
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (LOCAL_DB,))
+            if not cur.fetchone():
+                cur.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                    sql.Identifier(LOCAL_DB), sql.Identifier(LOCAL_ROLE)))
+            cur.execute(sql.SQL("GRANT ALL PRIVILEGES ON DATABASE {} TO {}").format(
+                sql.Identifier(LOCAL_DB), sql.Identifier(LOCAL_ROLE)))
+            cur.execute(
+                "DO $$ BEGIN CREATE ROLE anon NOLOGIN; "
+                "EXCEPTION WHEN duplicate_object THEN NULL; END $$"
+            )
+    finally:
+        conn.close()
+
+    conn = connect(LOCAL_DB)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql.SQL("ALTER SCHEMA public OWNER TO {}").format(
+                sql.Identifier(LOCAL_ROLE)))
+            cur.execute(sql.SQL("GRANT ALL ON SCHEMA public TO {}").format(
+                sql.Identifier(LOCAL_ROLE)))
+    finally:
+        conn.close()
+
+    return build_local_dsn(app_password, host, port)
+
+
+def check_dsn(dsn: str) -> None:
+    """Бросает исключение, если по DSN нельзя подключиться."""
+    import psycopg2
+    psycopg2.connect(dsn, connect_timeout=5).close()

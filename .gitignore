@@ -17,3 +17,9 @@ nohup.out
 Release/windows/build_venv/
 Release/windows/dist/
 Release/windows/output/
+
+# Документация разработки
+TechSpecs/
+docs/
+reference/
+.playwright-mcp/

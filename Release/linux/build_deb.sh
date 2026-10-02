@@ -7,7 +7,7 @@
 # exFAT/9p), права там не сохраняются и сборка падает с ошибкой прав доступа.
 set -e
 
-VERSION="1.1.0"
+VERSION="1.2.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BUILD_DIR="$(mktemp -d)"
@@ -15,16 +15,19 @@ PKG="$BUILD_DIR/pkgroot"
 
 trap 'rm -rf "$BUILD_DIR"' EXIT
 
-mkdir -p "$PKG/DEBIAN" "$PKG/opt/work-timer/sql/migrations" "$PKG/usr/share/applications"
+mkdir -p "$PKG/DEBIAN" "$PKG/opt/work-timer/sql/migrations" "$PKG/opt/work-timer/sql/bootstrap" "$PKG/usr/share/applications"
 
 cp "$ROOT_DIR/timer.py" "$PKG/opt/work-timer/timer.py"
-cp "$ROOT_DIR/db_backend.py" "$PKG/opt/work-timer/db_backend.py"
+for f in db_backend.py app_config.py report_core.py plan_import.py web_server.py web_page.py wizard.py local_pg_linux.py; do
+    cp "$ROOT_DIR/$f" "$PKG/opt/work-timer/$f"
+done
 cp "$ROOT_DIR/requirements.txt" "$PKG/opt/work-timer/requirements.txt"
 cp "$ROOT_DIR/.env.example" "$PKG/opt/work-timer/.env.example"
 cp "$ROOT_DIR/create_table.sql" "$PKG/opt/work-timer/create_table.sql"
 cp "$ROOT_DIR/README.md" "$PKG/opt/work-timer/README.md"
 cp "$ROOT_DIR/GUIDE.md" "$PKG/opt/work-timer/GUIDE.md"
 cp "$ROOT_DIR"/sql/migrations/*.sql "$PKG/opt/work-timer/sql/migrations/"
+cp "$ROOT_DIR"/sql/bootstrap/*.sql "$PKG/opt/work-timer/sql/bootstrap/"
 cp "$SCRIPT_DIR/pkg-src/autostart.sh" "$PKG/opt/work-timer/autostart.sh"
 cp "$SCRIPT_DIR/pkg-src/control" "$PKG/DEBIAN/control"
 cp "$SCRIPT_DIR/pkg-src/postinst" "$PKG/DEBIAN/postinst"
