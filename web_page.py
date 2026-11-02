@@ -29,6 +29,9 @@ INDEX_HTML = r"""<!doctype html>
   .nav { display:flex; gap:8px; flex-wrap:wrap; }
   button { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px;
            padding:6px 12px; font:inherit; cursor:pointer; }
+  a.btn { background:var(--card); color:var(--fg); border:1px solid var(--line); border-radius:4px;
+          padding:6px 12px; text-decoration:none; }
+  a.btn:hover { background:var(--btn-hover); }
   button:hover:not(:disabled) { background:var(--btn-hover); }
   button:disabled { opacity:.5; cursor:default; }
   .total { background:var(--card); border:1px solid var(--line); border-radius:4px; padding:10px 24px; text-align:center; }
@@ -80,6 +83,7 @@ INDEX_HTML = r"""<!doctype html>
         <button id="next">Следующий →</button>
         <button id="refresh">⟳ Обновить</button>
         <button id="planBtn">📅 Плановые часы</button>
+        <a class="btn" href="/stats">📊 Статистика</a>
       </div>
     </div>
     <div class="total">

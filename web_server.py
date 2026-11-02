@@ -7,16 +7,18 @@ Host (защита от DNS rebinding). Данные — через тот же 
 import json
 import os
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import plan_import
 import report_core
+from stats_page import STATS_HTML
 from web_page import INDEX_HTML
 
 DEFAULT_PORT = 8765
 MAX_BODY = 64 * 1024
+MAX_RANGE_DAYS = 1100
 
 
 def month_range_utc(year: int, month: int) -> tuple:
@@ -30,16 +32,31 @@ def month_range_utc(year: int, month: int) -> tuple:
     return first - timedelta(days=1), nxt + timedelta(days=1)
 
 
+def range_utc(first: date, last: date) -> tuple:
+    """[first − 1 день, last + 2 дня) в UTC — тот же суточный запас, что и у месяца."""
+    start = datetime(first.year, first.month, first.day, tzinfo=timezone.utc)
+    end = datetime(last.year, last.month, last.day, tzinfo=timezone.utc)
+    return start - timedelta(days=1), end + timedelta(days=2)
+
+
 def build_report(db, year: int, month: int) -> dict:
     from_utc, to_utc = month_range_utc(year, month)
-    sessions = report_core.fetch_sessions(db, from_utc, to_utc)
     try:
         plan_hours = db.select_plan_hours(year, month)
     except Exception:
         plan_hours = None  # таблицы плана может не быть — это не ошибка отчёта
+    return _report_payload(db, from_utc, to_utc, plan_hours, year=year, month=month)
+
+
+def build_range_report(db, first: date, last: date) -> dict:
+    from_utc, to_utc = range_utc(first, last)
+    return _report_payload(db, from_utc, to_utc, None, **{"from": first.isoformat(), "to": last.isoformat()})
+
+
+def _report_payload(db, from_utc, to_utc, plan_hours, **meta) -> dict:
+    sessions = report_core.fetch_sessions(db, from_utc, to_utc)
     return {
-        "year": year,
-        "month": month,
+        **meta,
         "planHours": plan_hours,
         "sessions": [
             {
@@ -85,6 +102,8 @@ def _make_handler(db, allowed_hosts: set):
             url = urlparse(self.path)
             if url.path == "/":
                 self._send(200, INDEX_HTML.encode("utf-8"), "text/html; charset=utf-8")
+            elif url.path == "/stats":
+                self._send(200, STATS_HTML.encode("utf-8"), "text/html; charset=utf-8")
             elif url.path == "/api/report":
                 self._report(parse_qs(url.query))
             elif url.path == "/api/plan":
@@ -93,6 +112,22 @@ def _make_handler(db, allowed_hosts: set):
                 self._json(404, {"error": "not found"})
 
         def _report(self, query: dict) -> None:
+            if "from" in query or "to" in query:
+                try:
+                    first = date.fromisoformat(query["from"][0])
+                    last = date.fromisoformat(query["to"][0])
+                    if not (2000 <= first.year <= 2100 and 2000 <= last.year <= 2100):
+                        raise ValueError
+                    if first > last or (last - first).days > MAX_RANGE_DAYS:
+                        raise ValueError
+                except (KeyError, ValueError, IndexError):
+                    self._json(400, {"error": "bad from/to"})
+                    return
+                try:
+                    self._json(200, build_range_report(db, first, last))
+                except Exception as exc:
+                    self._json(500, {"error": str(exc)})
+                return
             try:
                 year = int(query["year"][0])
                 month = int(query["month"][0])

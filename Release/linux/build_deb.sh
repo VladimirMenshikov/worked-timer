@@ -18,7 +18,7 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 mkdir -p "$PKG/DEBIAN" "$PKG/opt/work-timer/sql/migrations" "$PKG/opt/work-timer/sql/bootstrap" "$PKG/usr/share/applications"
 
 cp "$ROOT_DIR/timer.py" "$PKG/opt/work-timer/timer.py"
-for f in db_backend.py app_config.py report_core.py plan_import.py web_server.py web_page.py wizard.py local_pg_linux.py; do
+for f in db_backend.py app_config.py report_core.py plan_import.py web_server.py web_page.py stats_page.py wizard.py local_pg_linux.py; do
     cp "$ROOT_DIR/$f" "$PKG/opt/work-timer/$f"
 done
 cp "$ROOT_DIR/requirements.txt" "$PKG/opt/work-timer/requirements.txt"
